@@ -1,0 +1,58 @@
+#!/system/bin/sh
+
+DIR=/data/adb/split
+LOG=$DIR/split.log
+
+ALLOW="com.android.chrome com.chrome.beta com.chrome.dev com.brave.browser org.mozilla.firefox org.mozilla.firefox_beta com.microsoft.emmx com.opera.browser com.opera.mini.native com.sec.android.app.sbrowser com.vivaldi.browser com.duckduckgo.mobile.android"
+
+[ -f "$DIR/focus_allow" ] && ALLOW="$ALLOW $(cat "$DIR/focus_allow")"
+[ -f "$DIR/focus_exempt" ] && ALLOW="$ALLOW $(cat "$DIR/focus_exempt")"
+
+log() { echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null; }
+
+is_allowed() {
+  for e in $ALLOW; do
+    [ "$1" = "$e" ] && return 0
+  done
+  return 1
+}
+
+relax() {
+  a=0
+  i=0
+  for p in $(pm list packages 2>/dev/null); do
+    pkg=${p#package:}
+    if is_allowed "$pkg"; then
+      cmd appops set "$pkg" TAKE_AUDIO_FOCUS allow >/dev/null 2>&1 && a=$((a + 1))
+      continue
+    fi
+    cmd appops set "$pkg" TAKE_AUDIO_FOCUS ignore >/dev/null 2>&1 && i=$((i + 1))
+  done
+  log "focus: $i relaxed, $a allowed"
+  echo "focus: $i relaxed, $a allowed"
+}
+
+restore() {
+  n=0
+  for p in $(pm list packages 2>/dev/null); do
+    cmd appops set "${p#package:}" TAKE_AUDIO_FOCUS default >/dev/null 2>&1 && n=$((n + 1))
+  done
+  log "focus restored on $n packages"
+  echo "focus restored on $n packages"
+}
+
+status() {
+  echo "policy overlay mounts: $(mount 2>/dev/null | grep -c audio_policy_configuration)"
+  echo "capture port cap: $(grep -c 'maxOpenCount="4"' /vendor/etc/audio_policy_configuration.xml 2>/dev/null)"
+  echo "chrome: $(cmd appops get com.android.chrome TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
+  echo "spotify: $(cmd appops get com.spotify.music TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
+  echo "log tail:"
+  tail -n 3 "$LOG" 2>/dev/null
+}
+
+case "$1" in
+  apply) relax ;;
+  restore) restore ;;
+  status) status ;;
+  *) echo "usage: splitctl apply|restore|status" ;;
+esac

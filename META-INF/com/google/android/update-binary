@@ -1,0 +1,69 @@
+#!/sbin/sh
+
+umask 022
+
+OUTFD="$2"
+ZIPFILE="$3"
+
+ui_print() {
+  if [ -n "$OUTFD" ] && [ -e "/proc/self/fd/$OUTFD" ]; then
+    echo -e "ui_print $1\nui_print" >> "/proc/self/fd/$OUTFD"
+  else
+    echo "$1"
+  fi
+}
+
+abort() {
+  ui_print "$1"
+  rm -rf "$TMPDIR"
+  exit 1
+}
+
+[ -n "$ZIPFILE" ] || abort "! Installer: no zip provided"
+
+if command -v unzip >/dev/null 2>&1; then
+  UNZIP="unzip"
+elif [ -x /data/adb/magisk/busybox ]; then
+  UNZIP="/data/adb/magisk/busybox unzip"
+elif [ -x /sbin/busybox ]; then
+  UNZIP="/sbin/busybox unzip"
+else
+  abort "! Installer: unzip not available"
+fi
+
+TMPDIR=/dev/tmp/pillarbox
+rm -rf "$TMPDIR"
+mkdir -p "$TMPDIR" || abort "! Installer: cannot write to /dev/tmp"
+
+ui_print "- Extracting module files"
+$UNZIP -o "$ZIPFILE" -x 'META-INF/*' -d "$TMPDIR" >&2 || abort "! Installer: extraction failed"
+
+MODPATH="$TMPDIR"
+MODID=$(grep '^id=' "$MODPATH/module.prop" | head -n1 | cut -d= -f2)
+[ -n "$MODID" ] || abort "! Installer: module.prop is missing an id"
+
+set_perm() {
+  chown "$1:$2" "$3" 2>/dev/null
+  chmod "$4" "$3" 2>/dev/null
+}
+
+set_perm_recursive() {
+  find "$1" -type d 2>/dev/null | while read -r d; do set_perm "$2" "$3" "$d" "$4"; done
+  find "$1" -type f 2>/dev/null | while read -r f; do set_perm "$2" "$3" "$f" "$5"; done
+}
+
+export MODPATH MODID ZIPFILE OUTFD
+export MAGISK_VER_CODE
+
+if [ -f "$MODPATH/customize.sh" ]; then
+  ui_print "- Running customize.sh"
+  sh "$MODPATH/customize.sh" >&2 || abort "! Installer: customize.sh failed"
+fi
+
+ui_print "- Creating module directory"
+mkdir -p /data/adb/modules_update
+rm -rf "/data/adb/modules_update/$MODID"
+mv "$MODPATH" "/data/adb/modules_update/$MODID" || abort "! Installer: cannot move module files"
+
+ui_print "- Done, reboot to load the engine"
+exit 0
