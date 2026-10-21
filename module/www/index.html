@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Split</title>
+<style>
+  :root{
+    --bg:#0d0f14; --card:#161a22; --line:#232838; --txt:#e7eaf0;
+    --dim:#8b93a7; --acc:#4c8dff; --ok:#2fbf71; --warn:#e5a13a;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:15px/1.45 -apple-system,Roboto,"Segoe UI",sans-serif;
+       padding:16px 14px 60px;max-width:720px;margin:0 auto}
+  h1{font-size:22px;margin:4px 0 2px;letter-spacing:-.3px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:14px;margin-bottom:14px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .pill{font-size:12px;padding:4px 10px;border-radius:20px;font-weight:600}
+  .pill.on{background:rgba(47,191,113,.14);color:var(--ok)}
+  .pill.off{background:rgba(229,161,58,.14);color:var(--warn)}
+  .switch{position:relative;width:52px;height:30px;border-radius:30px;
+          background:#2a3040;transition:.18s;flex:none;cursor:pointer}
+  .switch.on{background:var(--ok)}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;
+                 border-radius:50%;background:#fff;transition:.18s}
+  .switch.on::after{transform:translateX(22px)}
+  input[type=search]{width:100%;padding:11px 13px;border-radius:11px;
+    border:1px solid var(--line);background:#10141b;color:var(--txt);
+    font-size:15px;outline:none}
+  input[type=search]:focus{border-color:var(--acc)}
+  .list{max-height:58vh;overflow:auto;margin-top:12px;
+        border-top:1px solid var(--line)}
+  .item{display:flex;align-items:center;gap:10px;padding:11px 2px;
+        border-bottom:1px solid var(--line)}
+  .name{flex:1;min-width:0}
+  .name b{display:block;font-weight:500;font-size:14px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .name span{display:block;color:var(--dim);font-size:11.5px;
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .seg{display:flex;background:#10141b;border:1px solid var(--line);
+       border-radius:9px;overflow:hidden;flex:none}
+  .seg button{border:0;background:transparent;color:var(--dim);font-size:12px;
+              padding:7px 10px;cursor:pointer;font-weight:500}
+  .seg button.sel{background:#243049;color:var(--txt)}
+  .seg button.sel.ig{background:rgba(76,141,255,.2);color:#9dc0ff}
+  .muted{color:var(--dim);font-size:12.5px}
+  .btn{border:1px solid var(--line);background:#10141b;color:var(--txt);
+       padding:9px 13px;border-radius:10px;font-size:13px;cursor:pointer}
+  .btn.danger{color:#ff8b8b;border-color:#4a2a2a}
+  .foot{margin-top:18px;color:var(--dim);font-size:12px;text-align:center}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+         background:#1e2532;color:var(--txt);padding:10px 16px;border-radius:11px;
+         font-size:13px;opacity:0;pointer-events:none;transition:.2s;
+         border:1px solid var(--line)}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<h1>Split</h1>
+<div class="sub">Per-app audio focus. <b>Normal</b> lets an app pause others. <b>Overlay</b> lets it play over them.</div>
+
+<div class="card row">
+  <div>
+    <div style="font-weight:600">Split</div>
+    <div class="muted" id="masterNote">—</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="pill off" id="pill">…</span>
+    <div class="switch" id="master"></div>
+  </div>
+</div>
+
+<div class="card">
+  <input type="search" id="q" placeholder="Search apps…" autocomplete="off">
+  <div class="list" id="list"><div class="muted" style="padding:14px 2px">Loading…</div></div>
+</div>
+
+<div class="card row">
+  <div class="muted" id="stats">—</div>
+  <button class="btn danger" id="reset">Reset all</button>
+</div>
+
+<div class="foot">Split 2.0 · changes apply instantly</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let enabled = 1, cur = {}, query = "";
+
+function toast(t){ const el=$('#toast'); el.textContent=t; el.classList.add('show');
+  clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),1600); }
+
+function api(q){ return fetch('cgi-bin/api?'+q,{cache:'no-store'}).then(r=>r.json()); }
+
+function shortName(p){
+  const parts = p.split('.');
+  return parts.length>2 ? parts.slice(1).join('.') : p;
+}
+
+function paintMaster(){
+  const sw=$('#master'), pill=$('#pill');
+  sw.classList.toggle('on', enabled===1);
+  pill.className = 'pill ' + (enabled?'on':'off');
+  pill.textContent = enabled ? 'Active' : 'Disabled';
+  $('#masterNote').textContent = enabled
+    ? 'Rules are applied'
+    : 'Everything is normal; no app can overlay';
+}
+
+function render(){
+  const list=$('#list');
+  const q=query.toLowerCase();
+  const rows = Object.keys(cur).sort((a,b)=>{
+    const ai = cur[a]==='ignore'?0:1, bi = cur[b]==='ignore'?0:1;
+    return ai-bi || a.localeCompare(b);
+  }).filter(p=>p.toLowerCase().includes(q));
+
+  if(!rows.length){ list.innerHTML='<div class="muted" style="padding:14px 2px">No match.</div>'; return; }
+
+  const frag=document.createDocumentFragment();
+  rows.forEach(p=>{
+    const m=cur[p]||'allow';
+    const d=document.createElement('div'); d.className='item';
+    d.innerHTML =
+      '<div class="name"><b>'+shortName(p)+'</b><span>'+p+'</span></div>'+
+      '<div class="seg">'+
+        '<button data-p="'+p+'" data-m="allow" class="'+(m==='allow'?'sel':'')+'">Normal</button>'+
+        '<button data-p="'+p+'" data-m="ignore" class="'+(m==='ignore'?'sel ig':'')+'">Overlay</button>'+
+      '</div>';
+    frag.appendChild(d);
+  });
+  list.innerHTML=''; list.appendChild(frag);
+
+  const ig = Object.values(cur).filter(v=>v==='ignore').length;
+  $('#stats').textContent = ig+' of '+Object.keys(cur).length+' apps set to overlay';
+}
+
+$('#list').addEventListener('click', async e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  const p=b.dataset.p, m=b.dataset.m;
+  if(cur[p]===m) return;
+  cur[p]=m; render();
+  const r=await api('cmd=set&pkg='+encodeURIComponent(p)+'&mode='+m).catch(()=>({ok:false}));
+  toast(r.ok ? shortName(p)+' → '+m : 'Failed');
+});
+
+$('#master').addEventListener('click', async ()=>{
+  const next = enabled ? 0 : 1;
+  enabled = next; paintMaster(); render();
+  await api('cmd='+(next?'enable':'disable')).catch(()=>{});
+  toast(next?'Split on':'Split off');
+});
+
+$('#q').addEventListener('input', e=>{ query=e.target.value; render(); });
+
+$('#reset').addEventListener('click', async ()=>{
+  if(!confirm('Reset every app to Normal and clear all rules?')) return;
+  toast('Resetting…');
+  await api('cmd=restoreall').catch(()=>{});
+  await load();
+  toast('Everything is back to normal');
+});
+
+function load(){
+  return Promise.all([api('cmd=state'), api('cmd=apps')]).then(([s,a])=>{
+    enabled = s.enabled===1?1:0;
+    cur = {};
+    (a.apps||[]).forEach(p=>cur[p]='allow');
+    (s.rules||[]).forEach(r=>{ if(cur[r.p]!==undefined) cur[r.p]=r.m; });
+    paintMaster(); render();
+  }).catch(()=>{
+    $('#list').innerHTML='<div class="muted" style="padding:14px 2px">Could not reach Split.</div>';
+  });
+}
+
+load();
+</script>
+</body>
+</html>

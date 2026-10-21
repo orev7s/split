@@ -1,181 +1,187 @@
 # Split
 
-Global audio concurrency for rooted Android. Stop apps from pausing each other.
+Per-app audio focus for rooted Android, with a local web UI.
 
 ```
-Music keeps playing over a video.
-Two calls run at once.
-Your keyboard's voice typing still works.
+Music keeps playing over a game.
+Any app can be switched back to normal behaviour.
+Turn the whole thing off and it is genuinely off.
 ```
 
-No companion app. No per-app configuration. No hooks. One module: enable it and audio stops being a zero-sum game, disable it and you are back to stock.
+No companion app, no Xposed, no hooks. One module, one app-op, and a page at
+`http://<device-ip>:8080` that writes the rules.
 
 ---
 
-## The problem
+## What v2 fixes
 
-Android's audio focus stack is a single-winner system. When one app starts playing, it asks for focus, and every other app is told to shut up. That is fine on a phone that plays one thing at a time. It is miserable on a tablet:
-
-- You are listening to Spotify. You open a video. Spotify pauses.
-- You are on a Discord call. Instagram calls you back. One of them silently gets nothing.
-- You press the microphone key on your keyboard. It says *"microphone already in use"*, even though nothing is recording.
-
-All three come from the same place: `AudioManager.requestAudioFocus()` and the policy that answers it.
-
-## How it works
-
-Split does not touch audio itself. It touches one app-op:
+v1 set `TAKE_AUDIO_FOCUS` to `ignore` on every installed package and reverted
+with `default`. **On HyperOS `default` is not stock.** The platform rejects the
+focus request and logs:
 
 ```
-TAKE_AUDIO_FOCUS
+W/AS.HardeningEnforcer: AudioHardening focus request for req 1 ignored
+                        for com.spotify.music (10302), level: partial
+W/AS.AudioService:      Audio focus request blocked by hardening
 ```
 
-Every app's request to own the audio output passes through this op. Split runs a sweep at boot and sets it to one of two values:
+With v1 installed, every app on the device sat in that state. Measured effect:
 
-| Mode | Applied to | Effect |
-|---|---|---|
-| `ignore` | everything | the request is refused, so the app **cannot pause anyone** — but most apps keep playing anyway |
-| `allow` | browsers, speech services, keyboards | the request succeeds, because these apps refuse to play without it |
+- Focus stack permanently empty — no app could ever own audio.
+- Blocked apps retried **every 5 seconds, indefinitely** — thousands of rejected
+  binder calls into `system_server` per day.
+- Disabling the module changed nothing, because `restore()` wrote `default`,
+  which is the exact state that was already broken.
 
-That split is the whole design. Deny focus to a video app and it plays alongside your music. Deny focus to Chrome and it stops dead; deny it to a speech recogniser and it reports a phantom microphone conflict. Allow those, and everything works at once.
+Verified on device: setting a package to `allow` stops the retry loop instantly
+and puts it back in the focus stack with `gain=GAIN`.
 
-### The detail that matters most
+So v2 never writes `default`. Only:
 
-On HyperOS, `TAKE_AUDIO_FOCUS: default` does **not** mean "stock behaviour". The platform resolves `default` through a restrictive default mode, so an app marked `default` still gets rejected. Exempt apps must be set to `allow` explicitly. If you fork this and wonder why your exemption does nothing, that is why. You can watch it happen: `rejectTime` keeps advancing on a package whose mode reads `default`.
+| Value | Meaning |
+|---|---|
+| `allow` | app takes focus normally and can pause others — **stock behaviour** |
+| `ignore` | app never takes focus, so it plays over others — **overlay** |
 
-### What is *not* in this module
+---
 
-- No Xposed, no LSPosed, no Zygisk module. Nothing is injected into any app's process.
-- No vendor audio-policy overlay. An earlier build raised `maxOpenCount` on the capture ports to allow concurrent recording; it caused speech recognition to fail with a real "microphone in use" because the HAL ended up holding several parallel input streams. It was removed. Stock Android already multiplexes capture clients onto one stream, which is why voice messages work next to each other without help.
-- No `aaudio.*` property changes. Tested and reverted: Chrome never used the MMAP path anyway.
+## The web UI
+
+Open `http://<device-ip>:8080` from the tablet or any machine on the same
+network.
+
+- **Master switch** — on applies your rules, off returns every app to `allow`.
+- **Per app** — `Normal` or `Overlay`, one tap, applied immediately.
+- **Search** — filters 400+ packages instantly.
+- **Reset all** — clears every rule and restores normal focus everywhere.
+
+Config lives in `/data/adb/split/`, outside the module directory, so it
+survives reboots, module updates and even disabling the module.
+
+```
+/data/adb/split/config.tsv    pkg<TAB>ignore, one per line
+/data/adb/split/enabled       1 or 0
+/data/adb/split/applied.txt   what is currently set to ignore
+/data/adb/split/port          optional, default 8080
+/data/adb/split/bind          optional, default 0.0.0.0
+```
+
+The server is BusyBox `httpd`, started at boot by `service.sh`. It runs whether
+or not Split is enabled — otherwise there would be no way to switch it back on.
+
+---
 
 ## Install
 
 1. Root with **KernelSU** or **Magisk**.
-2. Flash `Split-Module-v1.0.0.zip`.
+2. Flash `Split-Module-v2.0.0.zip`.
 3. Reboot.
+4. Open `http://<device-ip>:8080`.
 
-The sweep runs about 25 seconds after boot, once the package manager is up.
+BusyBox is required for the web UI. KernelSU and Magisk both ship one; the
+service checks `/data/adb/ksu/bin/busybox`, `/data/adb/magisk/busybox` and
+`$PATH`.
+
+---
+
+## Command line
+
+```sh
+su -c /data/adb/split/splitctl status
+su -c '/data/adb/split/splitctl set com.spotify.music ignore'
+su -c '/data/adb/split/splitctl set com.spotify.music allow'
+su -c /data/adb/split/splitctl disable     # everything back to allow
+su -c /data/adb/split/splitctl enable      # re-apply saved rules
+su -c /data/adb/split/splitctl restore-all # nuclear: allow on every package
+```
+
+`restore-all` is slow by nature — one appops write per installed package,
+roughly a minute for ~450 packages. `restore` only touches packages Split has
+changed, so it is near instant.
+
+---
 
 ## Revert
 
-**Disable the module → reboot.** The vendor overlay is gone with the module, and a watchdog at `/data/adb/service.d/split-watchdog.sh` runs on every boot; when it sees the module disabled or removed, it restores every package's op to `default`.
+Disable the module and reboot. The watchdog at
+`/data/adb/service.d/split-watchdog.sh` sees the module disabled or removed and
+runs `splitctl restore`, which sets every changed package back to `allow`.
 
 By hand, any time:
 
 ```sh
-su -c /data/adb/split/splitctl restore
+su -c /data/adb/split/splitctl disable
 ```
 
-Uninstalling does the same and deletes the state directory.
+Uninstalling does the same, then deletes `/data/adb/split` and the watchdog.
 
-## Allowing another app
-
-Any app that goes **silent** instead of degrading gracefully needs to be on the allow list — it is refusing to play without focus. One line, no rebuild:
-
-```sh
-su -c 'echo com.example.app >> /data/adb/split/focus_allow'
-su -c /data/adb/split/splitctl apply
-```
-
-The list survives reboots. Browsers (Chrome, Chrome Beta/Dev, Brave, Firefox, Edge, Opera, Samsung Internet, Vivaldi, DuckDuckGo), Google's speech service and Gboard are already on it.
-
-Trade-off, stated plainly: allowed apps can pause other apps again. There is no mode where two apps both *own* focus — only modes where neither can enforce it.
-
-## Compatibility
-
-Tested working on:
-
-- Xiaomi Pad 8 Pro
-- Xiaomi Pad 7 Ultra
-- Xiaomi Pad 7
-- Poco X7 Pro
-- Redmi 10 Pro Max
-
-Reported working across Xiaomi / HyperOS devices generally. Other manufacturers are untested — the mechanism is plain AOSP, but the `default`-mode quirk above is HyperOS-specific, so behaviour elsewhere may differ. If you run it on something else, open an issue with the output of the debug commands below.
+---
 
 ## Debugging
 
-This module is a thin wrapper over two inspectable systems. Do not guess; read them.
-
-### 1. Is the app-op actually applied?
-
 ```sh
-su -c 'cmd appops get <package> TAKE_AUDIO_FOCUS'
+# what does the op actually say?
+su -c 'cmd appops get com.spotify.music TAKE_AUDIO_FOCUS'
+
+# who owns audio right now?
+su -c 'dumpsys audio | grep -A6 "Audio Focus stack"'
+
+# is anything still being blocked? these lines should stop appearing
+su -c 'dumpsys audio | grep AudioHardening | tail'
 ```
 
-You want `ignore` (normal apps) or `allow` (exempt apps). Watch `rejectTime` — if it is recent while the mode reads `default`, you have hit the HyperOS default-mode trap.
+Reading the result:
 
-### 2. Who holds focus, and who asked?
+| Symptom | Meaning |
+|---|---|
+| `ignore`, app plays over others | working as configured |
+| `allow`, app pauses when another starts | stock behaviour, working |
+| `default` | broken state — run `splitctl apply` |
+| `AudioHardening ... ignored` repeating | that package is not at `allow`; either set it to `allow` or accept it is in overlay mode |
+| Web page does not load | BusyBox missing, or `service.sh` did not run; check `ps -A \| grep httpd` |
 
+---
+
+## Compatibility
+
+Tested on:
+
+- Xiaomi Pad 8 Pro (HyperOS, Android 16) — where the `default` behaviour above
+  was measured
+- Xiaomi Pad 7 Ultra, Xiaomi Pad 7
+- Poco X7 Pro, Redmi 10 Pro Max
+
+The `default`-is-not-stock quirk is HyperOS-specific. On other ROMs `default`
+may well behave like stock; v2 avoids it either way, so behaviour is the same
+everywhere.
+
+Requires KernelSU or Magisk. No per-app configuration app is needed or provided
+beyond the web page.
+
+---
+
+## Building
+
+No compiler step.
+
+**Linux / macOS / Termux**
 ```sh
-su -c dumpsys audio | grep -A 40 "Audio Focus stack"
+cd module && zip -r ../Split-Module-v2.0.0.zip . -x '.*'
 ```
 
-The `Events log: focus commands as seen by MediaFocusControl` section lists every request and abandon with package names. If your app requests and then loses, the stack tells you who beat it.
-
-### 3. Is Xiaomi refusing on its own?
-
-```sh
-adb logcat -d -b all | grep -i hardening
-```
-
-On HyperOS you will see:
-
-```
-W AS.HardeningEnforcer: AudioHardening focus request for req 1 ignored for com.android.chrome (10174)
-```
-
-That single line is what proved the app-op path was the cause and not the audio hardware.
-
-### 4. Did the audio stream actually open?
-
-```sh
-adb logcat -d -b all | grep -iE "AudioStreamBuilder|AudioTrack|MediaSessionService"
-```
-
-- `build() uid=... clientName=com.android.chrome` then `playbackState=PAUSED` within a second → **focus** problem, the app gave up after being refused.
-- `AudioStreamBuilder` missing or followed by an open failure → **stream** problem, the HAL refused the device.
-- `mStreamsIn size N` from the Xiaomi HAL → how many input streams are open at once. More than one is unusual and worth investigating.
-
-### Reading the result
-
-| Symptom | Layer | Fix |
-|---|---|---|
-| App plays then instantly pauses/stops | focus | add to `focus_allow` |
-| "Microphone already in use" with nothing recording | focus on the recogniser's host app | add that host app to `focus_allow` |
-| No audio but video runs | stream | check `dumpsys media.audio_flinger` |
-| Everything pauses normally | sweep didn't run | `splitctl status`, check `service.sh` |
-
-## Building it yourself
-
-The module is just files and a zip — there is no compiler step.
-
-**Linux / macOS / Termux:**
-
-```sh
-cd module
-zip -r ../Split-Module-v1.0.0.zip . -x '.*'
-```
-
-**Windows:**
-
+**Windows**
 ```powershell
 ./build.ps1
 ```
 
-Requirements, in both cases:
+Requirements:
 
-- LF line endings on every script (`customize.sh`, `service.sh`, `bin/splitctl`, `update-binary`). CRLF silently breaks the shebang and the module installs but does nothing.
-- Forward slashes in zip entry names. `Compress-Archive` writes backslashes and produces a zip Android cannot extract — `build.ps1` builds entries by hand for this reason.
-- The `META-INF/com/google/android/update-binary` installer must stay in the archive.
-
-After flashing, confirm it ran:
-
-```sh
-su -c /data/adb/split/splitctl status
-su -c /data/adb/split/splitctl apply
-```
+- LF line endings on every script (`customize.sh`, `service.sh`, `bin/splitctl`,
+  `www/cgi-bin/api`, `update-binary`). CRLF silently breaks the shebang.
+- Forward slashes in zip entry names. `Compress-Archive` writes backslashes and
+  produces a zip Android cannot extract; `build.ps1` builds entries by hand.
+- `META-INF/com/google/android/update-binary` must stay in the archive.
+- `www/cgi-bin/api` must be executable after install — `customize.sh` sets it.
 
 ## Layout
 
@@ -183,14 +189,14 @@ su -c /data/adb/split/splitctl apply
 module/
   module.prop                 identity and version
   customize.sh                install-time setup + watchdog install
-  service.sh                  boot-time sweep
-  uninstall.sh                restore and clean up
-  bin/splitctl                apply | restore | status
+  service.sh                  boot: apply rules, start the web UI
+  uninstall.sh                restore, stop server, clean up
+  bin/splitctl                apply | restore | restore-all | set | enable | disable | status
+  www/index.html              the UI
+  www/cgi-bin/api             JSON API behind it
   META-INF/…/update-binary    KernelSU/Magisk installer
 ```
 
-`splitctl` is the whole engine: it enumerates packages, sets the op, and logs counts to `/data/adb/split/split.log`.
-
 ## License
 
-MIT. Fork it, break it, fix it.
+MIT.

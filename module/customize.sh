@@ -1,14 +1,25 @@
 #!/system/bin/sh
 
-ui_print "- Split"
-ui_print "- Audio focus relaxed at boot for every installed app"
-ui_print "- Browsers, speech services and IMEs exempted so they still play"
-ui_print "- Reverts automatically when the module is disabled"
+ui_print "- Split 2.0"
+ui_print "- Per-app audio focus, managed from a local web page"
+ui_print "- Reverts to normal focus when disabled, for real this time"
 
-mkdir -p /data/adb/split
-cp -f "$MODPATH/bin/splitctl" /data/adb/split/splitctl
-chmod 0755 /data/adb/split/splitctl
+DIR=/data/adb/split
 
+mkdir -p "$DIR" "$DIR/www"
+cp -f "$MODPATH/bin/splitctl" "$DIR/splitctl"
+chmod 0755 "$DIR/splitctl"
+rm -rf "$DIR/www"
+cp -a "$MODPATH/www" "$DIR/www"
+chmod -R 0755 "$DIR/www"
+find "$DIR/www" -type f -exec chmod 0644 {} \;
+chmod 0755 "$DIR/www/cgi-bin/api"
+
+[ -f "$DIR/config.tsv" ] || : > "$DIR/config.tsv"
+[ -f "$DIR/enabled" ]    || echo 1 > "$DIR/enabled"
+[ -f "$DIR/applied.txt" ] || : > "$DIR/applied.txt"
+
+# boot watchdog: if the module is disabled or removed, undo the rules
 mkdir -p /data/adb/service.d
 cat > /data/adb/service.d/split-watchdog.sh <<'EOF'
 #!/system/bin/sh

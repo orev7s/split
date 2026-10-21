@@ -1,6 +1,6 @@
 id=split
 name=Split
-version=v1.0.0
-versionCode=10000
+version=v2.0.0
+versionCode=20000
 author=orev7s
-description=Global audio focus unlock. Apps stop pausing each other, so music keeps playing over video and calls, and speech services still work. No app, no configuration: enable the module and it applies, disable it and everything returns to stock.
+description=Per-app audio focus with a local web UI. Pick which apps may play over others and which behave normally. Disabling it actually restores normal focus. No Xposed, no hooks, no per-app config app.

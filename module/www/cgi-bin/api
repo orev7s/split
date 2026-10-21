@@ -1,0 +1,75 @@
+#!/system/bin/sh
+# Split web API. BusyBox httpd CGI. GET only.
+
+DIR=/data/adb/split
+CONF=$DIR/config.tsv
+ENABLED=$DIR/enabled
+CTL=$DIR/splitctl
+
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+
+cmd=""; pkg=""; mode=""
+oldIFS=$IFS
+IFS='&'
+for kv in $QUERY_STRING; do
+  k=${kv%%=*}
+  v=${kv#*=}
+  case "$k" in
+    cmd)  cmd="$v" ;;
+    pkg)  pkg="$v" ;;
+    mode) mode="$v" ;;
+  esac
+done
+IFS=$oldIFS
+
+[ -f "$CONF" ] || : > "$CONF"
+
+case "$cmd" in
+
+  state)
+    e=$(cat "$ENABLED" 2>/dev/null); [ -n "$e" ] || e=1
+    rules=$(awk -F'\t' 'NF>=2 && $1 !~ /^#/ {
+        gsub(/[^A-Za-z0-9._]/,"",$1); gsub(/[^a-z]/,"",$2);
+        if ($1 != "") printf "%s{\"p\":\"%s\",\"m\":\"%s\"}", (n++ ? "," : ""), $1, $2
+      }' "$CONF" 2>/dev/null)
+    printf '{"enabled":%s,"rules":[%s]}\n' "$e" "$rules"
+    ;;
+
+  apps)
+    list=$(pm list packages 2>/dev/null | sed 's/^package://' \
+      | awk '{printf "%s\"%s\"", (n++ ? "," : ""), $0}')
+    printf '{"apps":[%s]}\n' "$list"
+    ;;
+
+  set)
+    if [ -z "$pkg" ]; then printf '{"ok":false,"err":"no package"}\n'; exit 0; fi
+    case "$pkg" in *[!A-Za-z0-9._]*) printf '{"ok":false,"err":"bad package"}\n'; exit 0 ;; esac
+    case "$mode" in allow|ignore) ;; *) printf '{"ok":false,"err":"bad mode"}\n'; exit 0 ;; esac
+    out=$("$CTL" set "$pkg" "$mode" 2>&1)
+    printf '{"ok":true,"result":"%s"}\n' "$out"
+    ;;
+
+  enable)
+    "$CTL" enable >/dev/null 2>&1
+    printf '{"ok":true,"enabled":1}\n'
+    ;;
+
+  disable)
+    "$CTL" disable >/dev/null 2>&1
+    printf '{"ok":true,"enabled":0}\n'
+    ;;
+
+  apply)
+    out=$("$CTL" apply 2>&1)
+    printf '{"ok":true,"result":"%s"}\n' "$out"
+    ;;
+
+  restoreall)
+    out=$("$CTL" restore-all 2>&1)
+    printf '{"ok":true,"result":"%s"}\n' "$out"
+    ;;
+
+  *)
+    printf '{"ok":false,"err":"unknown cmd"}\n'
+    ;;
+esac

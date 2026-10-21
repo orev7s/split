@@ -1,58 +1,187 @@
 #!/system/bin/sh
+#
+# splitctl 2.0 -- per-app audio focus policy with a persistent config
+#
+# WHY 2.0 EXISTS
+# --------------
+# v1 set TAKE_AUDIO_FOCUS to "ignore" on every installed package and restored
+# with "default". On HyperOS "default" does NOT mean stock: the platform rejects
+# the focus request and logs
+#     AudioHardening focus request ignored ... level: partial
+# so v1's revert was a no-op and every app sat in a 5 second rejection loop.
+# Measured on device: setting a package to "allow" stopped the loop instantly
+# and put the app back in the focus stack with gain=GAIN.
+#
+# Therefore this module only ever writes two values:
+#     allow  -> app takes focus normally, pauses others (stock behaviour)
+#     ignore -> app never takes focus, so it plays over others
+# "default" is never written. It is the broken state.
+#
+# STATE
+#   /data/adb/split/config.tsv   one "<package><TAB><mode>" per line
+#   /data/adb/split/enabled      "1" or "0"
+#   /data/adb/split/applied.txt  packages this module has set to ignore
 
 DIR=/data/adb/split
+CONF=$DIR/config.tsv
+ENABLED=$DIR/enabled
+APPLIED=$DIR/applied.txt
 LOG=$DIR/split.log
-
-ALLOW="com.android.chrome com.chrome.beta com.chrome.dev com.brave.browser org.mozilla.firefox org.mozilla.firefox_beta com.microsoft.emmx com.opera.browser com.opera.mini.native com.sec.android.app.sbrowser com.vivaldi.browser com.duckduckgo.mobile.android"
-
-[ -f "$DIR/focus_allow" ] && ALLOW="$ALLOW $(cat "$DIR/focus_allow")"
-[ -f "$DIR/focus_exempt" ] && ALLOW="$ALLOW $(cat "$DIR/focus_exempt")"
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null; }
 
-is_allowed() {
-  for e in $ALLOW; do
-    [ "$1" = "$e" ] && return 0
-  done
-  return 1
+valid_pkg() {
+  case "$1" in
+    ""|*[!A-Za-z0-9._]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
-relax() {
-  a=0
-  i=0
-  for p in $(pm list packages 2>/dev/null); do
-    pkg=${p#package:}
-    if is_allowed "$pkg"; then
-      cmd appops set "$pkg" TAKE_AUDIO_FOCUS allow >/dev/null 2>&1 && a=$((a + 1))
-      continue
+valid_mode() {
+  case "$1" in allow|ignore) return 0 ;; *) return 1 ;; esac
+}
+
+ensure() {
+  mkdir -p "$DIR" 2>/dev/null
+  [ -f "$CONF" ] || : > "$CONF"
+  [ -f "$ENABLED" ] || echo 1 > "$ENABLED"
+}
+
+is_enabled() { [ "$(cat "$ENABLED" 2>/dev/null)" = "1" ]; }
+
+mode_of() {
+  m=$(awk -F'\t' -v p="$1" '$1==p{print $2; exit}' "$CONF" 2>/dev/null)
+  [ -n "$m" ] && echo "$m" || echo allow
+}
+
+# write one package, recording what we changed so revert is exact
+set_one() {
+  pkg=$1
+  mode=$2
+  valid_pkg "$pkg" || return 1
+  valid_mode "$mode" || return 1
+  cmd appops set "$pkg" TAKE_AUDIO_FOCUS "$mode" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------- apply
+apply() {
+  ensure
+  if ! is_enabled; then
+    restore
+    return 0
+  fi
+  n_ig=0
+  n_al=0
+  : > "$APPLIED.new"
+  while IFS=$(printf '\t') read -r pkg mode; do
+    [ -n "$pkg" ] || continue
+    case "$pkg" in \#*) continue ;; esac
+    valid_mode "$mode" || continue
+    if set_one "$pkg" "$mode"; then
+      if [ "$mode" = "ignore" ]; then
+        echo "$pkg" >> "$APPLIED.new"
+        n_ig=$((n_ig+1))
+      else
+        n_al=$((n_al+1))
+      fi
     fi
-    cmd appops set "$pkg" TAKE_AUDIO_FOCUS ignore >/dev/null 2>&1 && i=$((i + 1))
-  done
-  log "focus: $i relaxed, $a allowed"
-  echo "focus: $i relaxed, $a allowed"
+  done < "$CONF"
+  mv -f "$APPLIED.new" "$APPLIED" 2>/dev/null
+  log "apply: $n_ig ignore, $n_al allow"
+  echo "applied: $n_ig ignore, $n_al allow"
+  return 0
 }
 
+# -------------------------------------------------------------- restore
+# Revert everything this module ever touched back to working focus.
+# "allow", never "default".
 restore() {
+  ensure
   n=0
-  for p in $(pm list packages 2>/dev/null); do
-    cmd appops set "${p#package:}" TAKE_AUDIO_FOCUS default >/dev/null 2>&1 && n=$((n + 1))
-  done
-  log "focus restored on $n packages"
-  echo "focus restored on $n packages"
+  if [ -f "$APPLIED" ]; then
+    while read -r pkg; do
+      [ -n "$pkg" ] || continue
+      valid_pkg "$pkg" || continue
+      cmd appops set "$pkg" TAKE_AUDIO_FOCUS allow >/dev/null 2>&1 && n=$((n+1))
+    done < "$APPLIED"
+    : > "$APPLIED"
+  fi
+  # also clear any config entry that is not ignore, so nothing is left half set
+  while IFS=$(printf '\t') read -r pkg mode; do
+    [ -n "$pkg" ] || continue
+    case "$pkg" in \#*) continue ;; esac
+    [ "$mode" = "ignore" ] || continue
+    valid_pkg "$pkg" || continue
+    cmd appops set "$pkg" TAKE_AUDIO_FOCUS allow >/dev/null 2>&1 && n=$((n+1))
+  done < "$CONF" 2>/dev/null
+  log "restore: $n packages set to allow"
+  echo "restored: $n"
 }
+
+# Nuclear option: every installed package to allow. Slow (~447 appops writes)
+# but it guarantees no residue from v1 or from anything else.
+restore_all() {
+  n=0
+  for p in $(pm list packages 2>/dev/null | sed 's/^package://'); do
+    cmd appops set "$p" TAKE_AUDIO_FOCUS allow >/dev/null 2>&1 && n=$((n+1))
+  done
+  : > "$APPLIED" 2>/dev/null
+  log "restore-all: $n"
+  echo "restored all: $n"
+}
+
+# ----------------------------------------------------------------- set
+setcmd() {
+  ensure
+  pkg=$1
+  mode=$2
+  valid_pkg "$pkg" || { echo "bad package"; return 1; }
+  valid_mode "$mode" || { echo "bad mode"; return 1; }
+
+  awk -F'\t' -v p="$pkg" '$1!=p' "$CONF" > "$CONF.tmp" 2>/dev/null
+  if [ "$mode" = "ignore" ]; then
+    printf '%s\t%s\n' "$pkg" "$mode" >> "$CONF.tmp"
+  fi
+  mv -f "$CONF.tmp" "$CONF"
+
+  if is_enabled; then
+    set_one "$pkg" "$mode"
+    if [ "$mode" = "ignore" ]; then
+      grep -qx "$pkg" "$APPLIED" 2>/dev/null || echo "$pkg" >> "$APPLIED"
+    else
+      grep -vx "$pkg" "$APPLIED" > "$APPLIED.tmp" 2>/dev/null
+      mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null
+    fi
+  fi
+  echo "$pkg -> $mode"
+}
+
+enable()  { ensure; echo 1 > "$ENABLED"; apply; }
+disable() { ensure; echo 0 > "$ENABLED"; restore; }
 
 status() {
-  echo "policy overlay mounts: $(mount 2>/dev/null | grep -c audio_policy_configuration)"
-  echo "capture port cap: $(grep -c 'maxOpenCount="4"' /vendor/etc/audio_policy_configuration.xml 2>/dev/null)"
-  echo "chrome: $(cmd appops get com.android.chrome TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
-  echo "spotify: $(cmd appops get com.spotify.music TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
-  echo "log tail:"
-  tail -n 3 "$LOG" 2>/dev/null
+  ensure
+  e=$(cat "$ENABLED" 2>/dev/null)
+  echo "enabled: $e"
+  echo "rules:   $(grep -c . "$CONF" 2>/dev/null || echo 0)"
+  echo "applied: $(grep -c . "$APPLIED" 2>/dev/null || echo 0)"
+  echo "--- samples ---"
+  for p in com.spotify.music com.supercell.brawlstars com.google.android.youtube; do
+    printf '%-32s %s\n' "$p" "$(cmd appops get "$p" TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
+  done
+  echo "--- hardening blocks (should be old or absent) ---"
+  dumpsys audio 2>/dev/null | grep "AudioHardening" | tail -2
+  echo "now: $(date '+%m-%d %H:%M:%S')"
 }
 
 case "$1" in
-  apply) relax ;;
-  restore) restore ;;
-  status) status ;;
-  *) echo "usage: splitctl apply|restore|status" ;;
+  apply)       apply ;;
+  restore)     restore ;;
+  restore-all) restore_all ;;
+  set)         setcmd "$2" "$3" ;;
+  enable)      enable ;;
+  disable)     disable ;;
+  status)      status ;;
+  *) echo "usage: splitctl apply|restore|restore-all|set <pkg> <allow|ignore>|enable|disable|status" ;;
 esac
