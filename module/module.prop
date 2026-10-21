@@ -1,6 +1,6 @@
 id=split
 name=Split
-version=v2.0.0
-versionCode=20000
+version=v2.0.1
+versionCode=20001
 author=orev7s
-description=Per-app audio focus with a local web UI. Pick which apps may play over others and which behave normally. Disabling it actually restores normal focus. No Xposed, no hooks, no per-app config app.
+description=Per-app audio focus with a KernelSU WebUI button. Pick which apps may play over others and which behave normally. Disabling it actually restores normal focus.

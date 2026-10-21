@@ -175,7 +175,48 @@ status() {
   echo "now: $(date '+%m-%d %H:%M:%S')"
 }
 
+# ----------------------------------------------------------------- serve
+# Optional HTTP UI. KernelSU's WebUI button does not need it; this is for
+# opening the panel from a desktop browser. Picks the first free port instead
+# of assuming 8080 is available.
+serve() {
+  ensure
+  BB=""
+  for c in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox /system/bin/busybox; do
+    [ -x "$c" ] && { BB="$c"; break; }
+  done
+  [ -n "$BB" ] || BB=$(command -v busybox 2>/dev/null)
+  [ -n "$BB" ] || { echo "no busybox"; return 1; }
+
+  BIND=$(cat "$DIR/bind" 2>/dev/null)
+  [ -n "$BIND" ] || BIND=0.0.0.0
+
+  pkill -f "httpd.*split/www" 2>/dev/null
+  sleep 1
+
+  port_busy() { $BB netstat -ltn 2>/dev/null | grep -q ":$1 "; }
+  try_port() {
+    port_busy "$1" && return 1
+    $BB httpd -p "$BIND:$1" -h "$DIR/www" >/dev/null 2>&1
+    sleep 1
+    port_busy "$1"
+  }
+
+  SAVED=$(cat "$DIR/port" 2>/dev/null)
+  for p in "$SAVED" 8080 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092; do
+    [ -n "$p" ] || continue
+    if try_port "$p"; then
+      echo "$p" > "$DIR/port"
+      echo "serving on $BIND:$p"
+      return 0
+    fi
+  done
+  echo "no free port"
+  return 1
+}
+
 case "$1" in
+  serve)       serve ;;
   apply)       apply ;;
   restore)     restore ;;
   restore-all) restore_all ;;
