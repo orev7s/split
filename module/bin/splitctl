@@ -219,8 +219,12 @@ status() {
   e=$(cat "$ENABLED" 2>/dev/null)
   echo "enabled: $e"
   echo "engine:  $([ -x "$DIR/splitctl" ] && echo present || echo MISSING)"
-  echo "rules:   $(grep -c . "$CONF" 2>/dev/null || echo 0)"
-  echo "applied: $(grep -c . "$APPLIED" 2>/dev/null || echo 0)"
+  # grep -c prints 0 AND exits 1 on an empty file, so `|| echo 0` used to
+  # yield two counts on separate lines.
+  r=$(grep -c . "$CONF" 2>/dev/null); [ -n "$r" ] || r=0
+  a=$(grep -c . "$APPLIED" 2>/dev/null); [ -n "$a" ] || a=0
+  echo "rules:   $r"
+  echo "applied: $a"
   echo "--- samples ---"
   for p in com.spotify.music com.supercell.brawlstars com.google.android.youtube; do
     printf '%-32s %s\n' "$p" "$(cmd appops get "$p" TAKE_AUDIO_FOCUS 2>/dev/null | head -n1)"
