@@ -2,7 +2,10 @@
 set -eu
 
 cd "$(dirname "$0")"
-VERSION="v1.0.0"
+# Derive from module.prop: a hardcoded string here shipped v1.0.0 names for
+# months after the module itself moved on.
+VERSION=$(sed -n 's/^version=//p' module/module.prop | tr -d '\r')
+[ -n "$VERSION" ] || { echo "no version in module/module.prop" >&2; exit 1; }
 OUT="Split-Module-${VERSION}.zip"
 
 rm -f "$OUT"

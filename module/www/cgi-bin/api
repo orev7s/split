@@ -6,7 +6,22 @@ CONF=$DIR/config.tsv
 ENABLED=$DIR/enabled
 CTL=$DIR/splitctl
 
+# Self-heal: after a hot reinstall $DIR may be gone while the engine still
+# exists inside the module directory. Redeploy it before answering.
+if [ ! -x "$CTL" ]; then
+  for c in /data/adb/modules/split/bin/splitctl /data/adb/modules_update/split/bin/splitctl; do
+    if [ -x "$c" ]; then
+      mkdir -p "$DIR" 2>/dev/null
+      cp -f "$c" "$CTL" 2>/dev/null && chmod 0755 "$CTL" 2>/dev/null
+      break
+    fi
+  done
+fi
+
 printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+
+# JSON-safe one-liner for command output
+clean() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/"/\\"/g'; }
 
 cmd=""; pkg=""; mode=""
 oldIFS=$IFS
@@ -45,28 +60,33 @@ case "$cmd" in
     if [ -z "$pkg" ]; then printf '{"ok":false,"err":"no package"}\n'; exit 0; fi
     case "$pkg" in *[!A-Za-z0-9._]*) printf '{"ok":false,"err":"bad package"}\n'; exit 0 ;; esac
     case "$mode" in allow|ignore) ;; *) printf '{"ok":false,"err":"bad mode"}\n'; exit 0 ;; esac
-    out=$("$CTL" set "$pkg" "$mode" 2>&1)
-    printf '{"ok":true,"result":"%s"}\n' "$out"
+    out=$("$CTL" set "$pkg" "$mode" 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok=true; else ok=false; fi
+    printf '{"ok":%s,"code":%s,"result":"%s"}\n' "$ok" "$rc" "$(clean "$out")"
     ;;
 
   enable)
-    "$CTL" enable >/dev/null 2>&1
-    printf '{"ok":true,"enabled":1}\n'
+    out=$("$CTL" enable 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok=true; else ok=false; fi
+    printf '{"ok":%s,"code":%s,"enabled":1}\n' "$ok" "$rc"
     ;;
 
   disable)
-    "$CTL" disable >/dev/null 2>&1
-    printf '{"ok":true,"enabled":0}\n'
+    out=$("$CTL" disable 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok=true; else ok=false; fi
+    printf '{"ok":%s,"code":%s,"enabled":0}\n' "$ok" "$rc"
     ;;
 
   apply)
-    out=$("$CTL" apply 2>&1)
-    printf '{"ok":true,"result":"%s"}\n' "$out"
+    out=$("$CTL" apply 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok=true; else ok=false; fi
+    printf '{"ok":%s,"code":%s,"result":"%s"}\n' "$ok" "$rc" "$(clean "$out")"
     ;;
 
   restoreall)
-    out=$("$CTL" restore-all 2>&1)
-    printf '{"ok":true,"result":"%s"}\n' "$out"
+    out=$("$CTL" restore-all 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok=true; else ok=false; fi
+    printf '{"ok":%s,"code":%s,"result":"%s"}\n' "$ok" "$rc" "$(clean "$out")"
     ;;
 
   *)

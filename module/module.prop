@@ -1,6 +1,6 @@
 id=split
 name=Split
-version=v2.0.1
-versionCode=20001
+version=v2.0.2
+versionCode=20002
 author=orev7s
-description=Per-app audio focus with a KernelSU WebUI button. Pick which apps may play over others and which behave normally. Disabling it actually restores normal focus.
+description=Per-app audio focus with a KernelSU WebUI button. Pick which apps may play over others and which behave normally. Disabling it actually restores normal focus. Self-heals if its state directory is wiped.

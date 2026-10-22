@@ -13,7 +13,16 @@ while [ $i -lt 30 ]; do
   i=$((i+1))
 done
 
-[ -f "$DIR/no_focus" ] || "$DIR/splitctl" apply
+# Self-heal before anything else. If $DIR was wiped (a hot reinstall runs the
+# old uninstall.sh, which deletes it) the engine may only exist inside the
+# module directory. Redeploy it from there instead of failing forever.
+CTL="$MODDIR/bin/splitctl"
+[ -x "$CTL" ] || CTL="$DIR/splitctl"
+[ -x "$CTL" ] && "$CTL" provision >/dev/null 2>&1
+
+[ -x "$DIR/splitctl" ] && CTL="$DIR/splitctl"
+
+[ -f "$DIR/no_focus" ] || "$CTL" apply
 
 # Optional browser UI. The KernelSU WebUI button does not need this.
-"$DIR/splitctl" serve
+"$CTL" serve

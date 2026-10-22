@@ -45,6 +45,36 @@ So v2 never writes `default`. Only two values:
 
 ---
 
+## What v2.0.2 fixes
+
+If every tap in the WebUI answers **Failed**, this is why, and this is what
+changed.
+
+The engine lived at `/data/adb/split/splitctl`, and only `customize.sh` ever put
+it there — once, at install time. A hot reinstall runs the *old* `uninstall.sh`
+first, and that script deletes `/data/adb/split` outright. The incoming module
+then had `hotinstall.sh` guarding itself with:
+
+```sh
+[ -x "$DIR/splitctl" ] || exit 0
+```
+
+so it quietly did nothing. End state: module files present, engine gone, every
+WebUI action exec'ing a binary that does not exist (`exit 127`), surfaced to the
+user as the single word "Failed".
+
+v2.0.2 removes the dependency instead of documenting it:
+
+- `splitctl provision` redeploys the engine from the module directory. Idempotent.
+- `customize.sh`, `service.sh`, `hotinstall.sh` and the WebUI all run it first.
+- The WebUI prepends a bootstrap to every `ksu.exec`, so a wiped state directory
+  heals on the next tap even before the boot service has run.
+- Failures report the reason — `Failed: appops rejected ...` — instead of "Failed".
+- `set` applies to the device *before* writing config, and returns a non-zero exit
+  code when appops rejects it. Config can no longer claim a state the device refused.
+
+---
+
 ## The WebUI
 
 Tap **WebUI** on the Split card in the KernelSU manager. There is no IP to look
@@ -77,7 +107,7 @@ reboots, module updates and even disabling the module.
 ## Install
 
 1. Root with **KernelSU** or **Magisk**.
-2. Flash `Split-Module-v2.0.1.zip`.
+2. Flash `Split-Module-v2.0.2.zip`.
 3. Reboot.
 4. Tap **WebUI** on the module card.
 
@@ -94,6 +124,7 @@ KernelSU WebUI needs nothing extra.
 
 ```sh
 su -c /data/adb/split/splitctl status
+su -c /data/adb/split/splitctl provision  # redeploy the engine, idempotent
 su -c '/data/adb/split/splitctl set com.spotify.music ignore'
 su -c '/data/adb/split/splitctl set com.spotify.music allow'
 su -c /data/adb/split/splitctl disable      # everything back to allow
@@ -148,6 +179,7 @@ Reading the result:
 | `allow`, app pauses when another starts | stock behaviour, working |
 | `default` | broken state: run `splitctl apply` |
 | `AudioHardening ... ignored` repeating | that package is not at `allow` |
+| WebUI says `Failed` | engine missing from `/data/adb/split` (run `splitctl provision`), or appops rejected the package; the toast now names the reason |
 | WebUI button missing | module not enabled, or `webroot/` missing from the module dir |
 | Browser UI does not load | BusyBox missing, or `ps -A \| grep httpd` is empty |
 
@@ -176,7 +208,7 @@ No compiler step.
 
 **Linux / macOS / Termux**
 ```sh
-cd module && zip -r ../Split-Module-v2.0.1.zip . -x '.*'
+cd module && zip -r ../Split-Module-v2.0.2.zip . -x '.*'
 ```
 
 **Windows**
@@ -204,8 +236,8 @@ module/
   service.sh                  boot: apply rules, start the browser UI
   hotinstall.sh               run right after a hot install
   uninstall.sh                restore, stop server, clean up
-  bin/splitctl                apply | restore | restore-all | set | enable |
-                              disable | serve | status
+  bin/splitctl                provision | apply | restore | restore-all | set |
+                              enable | disable | serve | status
   webroot/index.html          the KernelSU WebUI
   www/index.html              same page, served over HTTP
   www/cgi-bin/api             JSON API behind it

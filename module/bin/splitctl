@@ -1,6 +1,6 @@
 #!/system/bin/sh
 #
-# splitctl 2.0 -- per-app audio focus policy with a persistent config
+# splitctl 2.0.2 -- per-app audio focus policy with a persistent config
 #
 # WHY 2.0 EXISTS
 # --------------
@@ -16,6 +16,18 @@
 #     allow  -> app takes focus normally, pauses others (stock behaviour)
 #     ignore -> app never takes focus, so it plays over others
 # "default" is never written. It is the broken state.
+#
+# WHY 2.0.2 EXISTS
+# ----------------
+# Everything here used to depend on customize.sh having run exactly once: the
+# engine was copied to $DIR/splitctl at install time and never again. A hot
+# reinstall runs the OLD uninstall.sh, which deletes $DIR, and then hotinstall.sh
+# hit `[ -x "$DIR/splitctl" ] || exit 0` and silently did nothing. The WebUI was
+# left calling a binary that no longer existed, so every tap reported "Failed"
+# with no explanation.
+#
+# So the engine can now deploy itself. `provision` is idempotent, and both the
+# boot service and the WebUI call it before doing anything else.
 #
 # STATE
 #   /data/adb/split/config.tsv   one "<package><TAB><mode>" per line
@@ -45,6 +57,7 @@ ensure() {
   mkdir -p "$DIR" 2>/dev/null
   [ -f "$CONF" ] || : > "$CONF"
   [ -f "$ENABLED" ] || echo 1 > "$ENABLED"
+  [ -f "$APPLIED" ] || : > "$APPLIED"
 }
 
 is_enabled() { [ "$(cat "$ENABLED" 2>/dev/null)" = "1" ]; }
@@ -64,6 +77,34 @@ set_one() {
   return 0
 }
 
+# ------------------------------------------------------------- provision
+# Idempotent self-deployment. Safe to call from service.sh, hotinstall.sh,
+# customize.sh, or the WebUI before any other subcommand. This is what makes a
+# wiped or half-installed $DIR recoverable instead of permanently broken.
+provision() {
+  ensure
+
+  self=$0
+  case "$self" in
+    /*) ;;
+    *) self=$(command -v "$self" 2>/dev/null || echo "$self") ;;
+  esac
+
+  if [ ! -x "$DIR/splitctl" ] && [ -f "$self" ]; then
+    cp -f "$self" "$DIR/splitctl" 2>/dev/null && chmod 0755 "$DIR/splitctl" 2>/dev/null
+  fi
+
+  if [ -x "$DIR/splitctl" ]; then
+    log "provision: ok"
+    echo "provisioned"
+    return 0
+  fi
+
+  log "provision: no engine at $DIR/splitctl (self=$self)"
+  echo "provision failed: cannot deploy engine from '$self'" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------- apply
 apply() {
   ensure
@@ -73,6 +114,7 @@ apply() {
   fi
   n_ig=0
   n_al=0
+  n_bad=0
   : > "$APPLIED.new"
   while IFS=$(printf '\t') read -r pkg mode; do
     [ -n "$pkg" ] || continue
@@ -85,11 +127,14 @@ apply() {
       else
         n_al=$((n_al+1))
       fi
+    else
+      n_bad=$((n_bad+1))
+      log "apply: failed $pkg ($mode)"
     fi
   done < "$CONF"
   mv -f "$APPLIED.new" "$APPLIED" 2>/dev/null
-  log "apply: $n_ig ignore, $n_al allow"
-  echo "applied: $n_ig ignore, $n_al allow"
+  log "apply: $n_ig ignore, $n_al allow, $n_bad failed"
+  echo "applied: $n_ig ignore, $n_al allow, $n_bad failed"
   return 0
 }
 
@@ -132,12 +177,22 @@ restore_all() {
 }
 
 # ----------------------------------------------------------------- set
+# Apply first, persist second. Config must never claim something appops
+# rejected, and the exit code has to be honest so the WebUI can say why.
 setcmd() {
   ensure
   pkg=$1
   mode=$2
-  valid_pkg "$pkg" || { echo "bad package"; return 1; }
-  valid_mode "$mode" || { echo "bad mode"; return 1; }
+  valid_pkg "$pkg" || { echo "bad package: '$pkg'" >&2; return 2; }
+  valid_mode "$mode" || { echo "bad mode: '$mode'" >&2; return 2; }
+
+  if is_enabled; then
+    if ! set_one "$pkg" "$mode"; then
+      log "set: appops rejected $pkg -> $mode"
+      echo "appops rejected $pkg -> $mode (is the package installed?)" >&2
+      return 1
+    fi
+  fi
 
   awk -F'\t' -v p="$pkg" '$1!=p' "$CONF" > "$CONF.tmp" 2>/dev/null
   if [ "$mode" = "ignore" ]; then
@@ -145,16 +200,15 @@ setcmd() {
   fi
   mv -f "$CONF.tmp" "$CONF"
 
-  if is_enabled; then
-    set_one "$pkg" "$mode"
-    if [ "$mode" = "ignore" ]; then
-      grep -qx "$pkg" "$APPLIED" 2>/dev/null || echo "$pkg" >> "$APPLIED"
-    else
-      grep -vx "$pkg" "$APPLIED" > "$APPLIED.tmp" 2>/dev/null
-      mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null
-    fi
+  if [ "$mode" = "ignore" ]; then
+    grep -qx "$pkg" "$APPLIED" 2>/dev/null || echo "$pkg" >> "$APPLIED"
+  else
+    grep -vx "$pkg" "$APPLIED" > "$APPLIED.tmp" 2>/dev/null
+    mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null
   fi
+
   echo "$pkg -> $mode"
+  return 0
 }
 
 enable()  { ensure; echo 1 > "$ENABLED"; apply; }
@@ -164,6 +218,7 @@ status() {
   ensure
   e=$(cat "$ENABLED" 2>/dev/null)
   echo "enabled: $e"
+  echo "engine:  $([ -x "$DIR/splitctl" ] && echo present || echo MISSING)"
   echo "rules:   $(grep -c . "$CONF" 2>/dev/null || echo 0)"
   echo "applied: $(grep -c . "$APPLIED" 2>/dev/null || echo 0)"
   echo "--- samples ---"
@@ -216,6 +271,7 @@ serve() {
 }
 
 case "$1" in
+  provision)   provision ;;
   serve)       serve ;;
   apply)       apply ;;
   restore)     restore ;;
@@ -224,5 +280,5 @@ case "$1" in
   enable)      enable ;;
   disable)     disable ;;
   status)      status ;;
-  *) echo "usage: splitctl apply|restore|restore-all|set <pkg> <allow|ignore>|enable|disable|status" ;;
+  *) echo "usage: splitctl provision|apply|restore|restore-all|set <pkg> <allow|ignore>|enable|disable|serve|status" ;;
 esac

@@ -98,6 +98,16 @@
   var HAS_KSU = (typeof window.ksu !== "undefined" && window.ksu !== null);
   var enabled = 1, cur = {}, labels = {}, query = "", busy = false;
 
+  /* Prefixed to every ksu.exec. If /data/adb/split was wiped -- a hot reinstall
+     runs the old uninstall.sh, which deletes it -- the engine still exists
+     inside the module dir. Redeploy from there instead of reporting "Failed"
+     because a binary vanished. This is why v2.0.2 cannot get stuck. */
+  var BOOT =
+    "D=/data/adb/split; mkdir -p $D; S=$D/splitctl; " +
+    "if [ ! -x $S ]; then " +
+    "for c in /data/adb/modules/split/bin/splitctl /data/adb/modules_update/split/bin/splitctl; do " +
+    "if [ -x $c ]; then cp -f $c $S && chmod 0755 $S; break; fi; done; fi; ";
+
   function toast(t){
     var el = $("#toast"); el.textContent = t; el.classList.add("show");
     clearTimeout(el._t); el._t = setTimeout(function(){ el.classList.remove("show"); }, 1700);
@@ -113,7 +123,7 @@
         resolve({errno: errno, stdout: stdout || "", stderr: stderr || ""});
       };
       try {
-        window.ksu.exec(cmd, "{}", name);
+        window.ksu.exec(BOOT + cmd, "{}", name);
       } catch(e) {
         delete window[name];
         resolve({errno:-1, stdout:"", stderr:String(e)});
@@ -159,10 +169,12 @@
     set: function(pkg, mode){
       if(HAS_KSU){
         return kexec("/data/adb/split/splitctl set " + pkg + " " + mode).then(function(r){
-          return {ok: r.errno === 0};
+          return { ok: r.errno === 0, code: r.errno,
+                   msg: ((r.stderr || "") + " " + (r.stdout || "")).trim() };
         });
       }
-      return hget("cmd=set&pkg=" + encodeURIComponent(pkg) + "&mode=" + mode);
+      return hget("cmd=set&pkg=" + encodeURIComponent(pkg) + "&mode=" + mode)
+        .then(function(j){ return {ok: !!j.ok, code: 0, msg: j.err || j.result || ""}; });
     },
 
     enable: function(on){
@@ -263,7 +275,12 @@
     if(cur[p] === m) return;
     cur[p] = m; render();
     Backend.set(p, m).then(function(r){
-      toast(r && r.ok === false ? "Failed" : ((labels[p] || pretty(p)) + " → " + m));
+      if(r && r.ok === false){
+        var why = (r.msg || "").slice(0, 90) || ("exit " + r.code);
+        toast("Failed: " + why);
+      } else {
+        toast((labels[p] || pretty(p)) + " → " + m);
+      }
     });
   });
 
