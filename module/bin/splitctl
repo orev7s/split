@@ -90,8 +90,28 @@ provision() {
     *) self=$(command -v "$self" 2>/dev/null || echo "$self") ;;
   esac
 
-  if [ ! -x "$DIR/splitctl" ] && [ -f "$self" ]; then
-    cp -f "$self" "$DIR/splitctl" 2>/dev/null && chmod 0755 "$DIR/splitctl" 2>/dev/null
+  # Deploy, and also REFRESH: a module update replaces the engine in the module
+  # directory, but the copy in $DIR survives it. Deploying "only if missing"
+  # leaves the WebUI running the previous version forever.
+  if [ -f "$self" ] && [ "$self" != "$DIR/splitctl" ]; then
+    stale=0
+    [ -x "$DIR/splitctl" ] || stale=1
+    if [ $stale -eq 0 ]; then
+      if command -v cmp >/dev/null 2>&1; then
+        cmp -s "$self" "$DIR/splitctl" || stale=1
+      else
+        stale=1
+      fi
+    fi
+    if [ $stale -eq 1 ]; then
+      # temp + mv: writing straight over the file fails with ETXTBSY if the
+      # WebUI is mid-exec, and AtomicFile-style replace is what we want anyway.
+      if cp -f "$self" "$DIR/splitctl.new" 2>/dev/null; then
+        chmod 0755 "$DIR/splitctl.new" 2>/dev/null
+        mv -f "$DIR/splitctl.new" "$DIR/splitctl" 2>/dev/null
+        log "provision: engine refreshed from $self"
+      fi
+    fi
   fi
 
   if [ -x "$DIR/splitctl" ]; then
